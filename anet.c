@@ -245,6 +245,33 @@ int anetTcpServer(char *err, int port, char *bindaddr)
     return s;
 }
 
+int anetUdpServer(char *err, int port, char *bindaddr) {
+    int s;
+    struct sockaddr_in sa;
+    
+    if ((s = socket(AF_INET, SOCK_DGRAM, 0)) == -1) {
+        anetSetError(err, "socket: %s\n", strerror(errno));
+        return ANET_ERR;
+    }
+    memset(&sa,0,sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bindaddr) {
+        if (inet_aton(bindaddr, &sa.sin_addr) == 0) {
+            anetSetError(err, "Invalid bind address\n");
+            close(s);
+            return ANET_ERR;
+        }
+    }
+    if (bind(s, (struct sockaddr*)&sa, sizeof(sa)) == -1) {
+        anetSetError(err, "bind: %s\n", strerror(errno));
+        close(s);
+        return ANET_ERR;
+    }
+    return s;
+}
+
 int anetAccept(char *err, int serversock, char *ip, int *port)
 {
     int fd;

@@ -45,5 +45,7 @@ int anetWrite(int fd, char *buf, int count);
 int anetNonBlock(char *err, int fd);
 int anetTcpNoDelay(char *err, int fd);
 int anetTcpKeepAlive(char *err, int fd);
+int anetUdpServer(char *err, int port, char *bindaddr);
+int anetSetSendBuffer(char *err, int fd, int buffsize);
 
 #endif

@@ -96,6 +96,7 @@
 #define REDIS_EXPIRELOOKUPS_PER_CRON    10 /* lookup 10 expires per loop */
 #define REDIS_MAX_WRITE_PER_EVENT (1024*64)
 #define REDIS_REQUEST_MAX_SIZE (1024*1024*256) /* max bytes in inline command */
+#define REDIS_UDP_SEND_BUFFER_SIZE (1024*128)
 
 /* If more then REDIS_WRITEV_THRESHOLD write packets are pending use writev */
 #define REDIS_WRITEV_THRESHOLD      3
@@ -363,7 +364,8 @@ struct saveparam {
 /* Global server state structure */
 struct redisServer {
     int port;
-    int fd;
+    int fd;                     /* TCP listening socket */
+    int ufd;                    /* UDP socket */
     redisDb *db;
     long long dirty;            /* changes to DB from the last save */
     list *clients;
@@ -373,11 +375,14 @@ struct redisServer {
     int cronloops;              /* number of times the cron function run */
     list *objfreelist;          /* A list of freed objects to avoid malloc() */
     time_t lastsave;            /* Unix time of last save succeeede */
+    /* UDP stuff */
+    redisClient *udpfc;         /* the fake client used to run UDP commands */
     /* Fields used only for stats */
     time_t stat_starttime;         /* server start time */
     long long stat_numcommands;    /* number of processed commands */
     long long stat_numconnections; /* number of connections received */
     long long stat_expiredkeys;   /* number of expired keys */
+    long long stat_udp_dropped_replies; /* dropped UDP replires: no buf */
     /* Configuration */
     int verbosity;
     int glueoutputbuf;
@@ -628,6 +633,7 @@ static int vmSwapOneObjectThreaded(void);
 static int vmCanSwapOut(void);
 static int tryFreeOneObjectFromFreelist(void);
 static void acceptHandler(aeEventLoop *el, int fd, void *privdata, int mask);
+static void readUdpRequest(aeEventLoop *el, int fd, void *privdata, int mask);
 static void vmThreadedIOCompletedJob(aeEventLoop *el, int fd, void *privdata, int mask);
 static void vmCancelThreadedIOJob(robj *o);
 static void lockThreadedIO(void);
@@ -664,6 +670,8 @@ static int prepareForShutdown();
 static void touchWatchedKey(redisDb *db, robj *key);
 static void touchWatchedKeysOnFlush(int dbid);
 static void unwatchAllKeys(redisClient *c);
+static struct redisClient *createFakeClient(void);
+static void freeFakeClient(struct redisClient *c);
 
 static void authCommand(redisClient *c);
 static void pingCommand(redisClient *c);
@@ -1787,10 +1795,12 @@ static void initServerConfig() {
 static void initServer() {
     int j;
 
+    /* Signals handling */
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
     setupSigSegvAction();
 
+    /* Basic server initialization */
     server.devnull = fopen("/dev/null","w");
     if (server.devnull == NULL) {
         redisLog(REDIS_WARNING, "Can't open /dev/null: %s", server.neterr);
@@ -1803,11 +1813,6 @@ static void initServer() {
     createSharedObjects();
     server.el = aeCreateEventLoop();
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
-    server.fd = anetTcpServer(server.neterr, server.port, server.bindaddr);
-    if (server.fd == -1) {
-        redisLog(REDIS_WARNING, "Opening TCP port: %s", server.neterr);
-        exit(1);
-    }
     for (j = 0; j < server.dbnum; j++) {
         server.db[j].dict = dictCreate(&dbDictType,NULL);
         server.db[j].expires = dictCreate(&keyptrDictType,NULL);
@@ -1831,12 +1836,36 @@ static void initServer() {
     server.stat_numcommands = 0;
     server.stat_numconnections = 0;
     server.stat_expiredkeys = 0;
+    server.stat_udp_dropped_replies = 0;
     server.stat_starttime = time(NULL);
     server.unixtime = time(NULL);
     aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL);
+
+    /* TCP server */
+    server.fd = anetTcpServer(server.neterr, server.port, server.bindaddr);
+    if (server.fd == -1) {
+        redisLog(REDIS_WARNING, "Opening TCP port: %s", server.neterr);
+        exit(1);
+    }
     if (aeCreateFileEvent(server.el, server.fd, AE_READABLE,
         acceptHandler, NULL) == AE_ERR) oom("creating file event");
 
+    /* UDP server */
+    server.ufd = anetUdpServer(server.neterr, server.port, server.bindaddr);
+    assert(anetNonBlock(server.neterr, server.ufd) != ANET_ERR);
+    if (server.ufd == -1) {
+        redisLog(REDIS_WARNING, "Opening UDP port: %s", server.neterr);
+        exit(1);
+    }
+    if (anetSetSendBuffer(server.neterr, server.ufd, REDIS_UDP_SEND_BUFFER_SIZE) == -1) {
+        redisLog(REDIS_WARNING,"Unable to set the UDP send buffer to %d bytes (non fatal error)", REDIS_UDP_SEND_BUFFER_SIZE);
+    }
+
+    if (aeCreateFileEvent(server.el, server.ufd, AE_READABLE,
+        readUdpRequest, NULL) == AE_ERR) oom("creating file event");
+    server.udpfc = createFakeClient();
+
+    /* Append only file */
     if (server.appendonly) {
         server.appendfd = open(server.appendfilename,O_WRONLY|O_APPEND|O_CREAT,0644);
         if (server.appendfd == -1) {
@@ -1846,6 +1875,7 @@ static void initServer() {
         }
     }
 
+    /* Virtual Memory */
     if (server.vm_enabled) vmInit();
 }
 
@@ -2988,6 +3018,115 @@ static void acceptHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
         return;
     }
     server.stat_numconnections++;
+}
+
+/* ========================== UDP protocol support  ========================= */
+typedef struct udpPacketHdr {
+    uint32_t reqid;
+    uint8_t opcode;     /* 1 = Request, 2 = Reply, 3 = Req ack, 4 = Ack */
+    uint8_t flags;      /* ack field if opcode == ACK */
+    uint16_t datalen;   /* Data length, only for Request and Reply packets */
+    uint16_t arity;     /* Number of arguments in request. Only for requests */
+    uint16_t dbid;      /* DB ID. Only for requests */
+} udpPacketHdr;
+
+#define REDIS_UDP_OPCODE_REQUEST 1
+#define REDIS_UDP_OPCODE_REPLY 2
+#define REDIS_UDP_OPCODE_REQACK 3
+#define REDIS_UDP_OPCODE_ACK 4
+
+#define REDIS_UDP_FLAG_NOREPLY 0x01
+#define REDIS_UDP_FLAG_NOACK 0x02
+#define REDIS_UDP_FLAG_AUTH 0x04
+#define REDIS_UDP_FLAG_TRUNC 0x08
+#define REDIS_UDP_FLAG_SLOWDOWN 0x10
+
+#define REDIS_UDP_PACKET_SIZE 65507
+#define REDIS_UDP_REPLY_SIZE (REDIS_UDP_PACKET_SIZE-8)
+
+/* Build and send a "malformed request" error packet. */
+static void udpSendReplyPacket(int fd, struct sockaddr *sa, socklen_t salen, uint32_t reqid, unsigned char *data, size_t datalen) {
+    char packet[REDIS_UDP_PACKET_SIZE];
+    udpPacketHdr *hdr = (udpPacketHdr*) packet;
+
+    hdr->reqid = htonl(reqid);
+    hdr->opcode = 2;
+    hdr->flags = 0;
+    if (datalen > REDIS_UDP_REPLY_SIZE) {
+        hdr->flags |= REDIS_UDP_FLAG_TRUNC;
+        datalen = REDIS_UDP_REPLY_SIZE;
+    }
+    hdr->datalen = htonl(datalen);
+    memcpy(packet+8,data,datalen);
+
+    if (sendto(fd, packet, 8+datalen, 0, sa, salen) == -1) {
+        if (errno != EAGAIN && errno != ENOBUFS)
+            server.stat_udp_dropped_replies++;
+        else
+            redisLog(REDIS_WARNING,"Unable to send the UDP reply: %s",
+                strerror(errno));
+    }
+    server.stat_numcommands++;
+}
+
+static void udpProcessRequest(int fd, struct sockaddr *sa, socklen_t salen, unsigned char *buf, size_t len) {
+    udpPacketHdr *hdr = (udpPacketHdr*)buf;
+    int dbid = ntohs(hdr->dbid);
+
+    if (dbid < 0 || dbid > server.dbnum) {
+        char *err = "-ERR Out of range DB number in UDP request\r\n";
+        udpSendReplyPacket(fd,sa,salen, ntohl(hdr->opcode),
+            (unsigned char*)err, strlen(err));
+        return;
+    }
+    selectDb(server.udpfc,dbid);
+}
+
+static void readUdpRequest(aeEventLoop *el, int fd, void *privdata, int mask) {
+    ssize_t len;
+    unsigned char buf[65536];
+    struct sockaddr_in sa;
+    socklen_t salen;
+    udpPacketHdr *hdr;
+
+    REDIS_NOTUSED(el);
+    REDIS_NOTUSED(mask);
+    REDIS_NOTUSED(privdata);
+
+    memset(&sa,0,sizeof(sa));
+    salen = sizeof(sa);
+    len = recvfrom(fd, buf, 65536, 0, (struct sockaddr*)&sa, &salen);
+    if (len == -1) {
+        redisLog(REDIS_DEBUG, "Error reading from UDP socket: %s",
+            strerror(errno));
+        return;
+    }
+
+    /* Basic sanity checks before passing to the higher level functions
+     * for packet processing. */
+    hdr = (udpPacketHdr*) buf;
+    if (len < 5 || hdr->opcode == 0 || hdr->opcode > 4 ||
+        (hdr->opcode == 1 && len < 12) ||
+        (hdr->opcode == 2 && len < 8) ||
+        (hdr->opcode == 4 && len < 6)) {
+        redisLog(REDIS_NOTICE, "Warning, UDP malformed request received");
+        /* We can't send an error reply if we can't patch the
+         * reply ID. So the packet should be at least 4 bytes. */
+        if (len >= 4) {
+            char *err = "-ERR Malformed Request\r\n";
+            udpSendReplyPacket(fd,(struct sockaddr*) &sa,salen,
+                ntohl(hdr->opcode),
+                (unsigned char*)err, strlen(err));
+        }
+        return;
+    }
+
+    /* Dispatch */
+    switch(hdr->opcode) {
+    case REDIS_UDP_OPCODE_REQUEST:
+        udpProcessRequest(fd,(struct sockaddr*)&sa,salen,buf,len);
+        break;
+    }
 }
 
 /* ======================= Redis objects implementation ===================== */
