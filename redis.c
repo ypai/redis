@@ -3076,17 +3076,115 @@ static void udpSendReplyPacket(int fd, struct sockaddr *sa, socklen_t salen, uin
     server.stat_numcommands++;
 }
 
+static void udpSendCommandReply(int fd, struct sockaddr *sa, socklen_t salen, udpPacketHdr *req) {
+    redisClient *c = server.udpfc;
+    listNode *ln;
+
+    glueReplyBuffersIfNeeded(c);
+    if (listLength(c->reply) == 1) {
+        ln = listFirst(c->reply);
+        robj *o = ln->value;
+
+        udpSendReplyPacket(fd,sa,salen,ntohl(req->reqid),o->ptr,sdslen(o->ptr));
+        listDelNode(c->reply,ln);
+    } else {
+        listIter li;
+        sds reply = sdsempty();
+
+        listRewind(c->reply,&li);
+        while((ln = listNext(&li))) {
+            robj *o = listNodeValue(ln);
+
+            reply = sdscatlen(reply,o->ptr,sdslen(o->ptr));
+            listDelNode(c->reply,ln);
+        }
+        udpSendReplyPacket(fd,sa,salen,ntohl(req->reqid),
+            (unsigned char*)reply,sdslen(reply));
+        sdsfree(reply);
+    }
+}
+
 static void udpProcessRequest(int fd, struct sockaddr *sa, socklen_t salen, unsigned char *buf, size_t len) {
     udpPacketHdr *hdr = (udpPacketHdr*)buf;
     int dbid = ntohs(hdr->dbid);
+    int argc = ntohs(hdr->arity);
+    int j, datalen = ntohs(hdr->datalen);
+    char *err = NULL;
+    unsigned char *p;
+    struct redisCommand *cmd;
+    redisClient *c = server.udpfc;
 
+    /* Is the DB id sane? */
     if (dbid < 0 || dbid > server.dbnum) {
-        char *err = "-ERR Out of range DB number in UDP request\r\n";
-        udpSendReplyPacket(fd,sa,salen, ntohl(hdr->opcode),
-            (unsigned char*)err, strlen(err));
-        return;
+        err = "-ERR Out of range DB number in UDP request\r\n";
+        goto fmterr;
     }
-    selectDb(server.udpfc,dbid);
+
+    /* Does the payload match the declared data length? */
+    if (len != sizeof(udpPacketHdr)+datalen) {
+        err = "-ERR UDP payload length does not match actual data length\r\n";
+        goto fmterr;
+    }
+
+    /* Decode the argument vector */
+    if (argc == 0) return; /* No OP */
+    p = buf+(sizeof(udpPacketHdr));
+    err = "-ERR UDP packet data section format error\r\n";
+    zfree(c->argv);
+    c->argc = 0;
+    c->argv = zmalloc(sizeof(robj*)*argc);
+    for (j = 0; j < argc; j++) {
+        uint16_t arglen;
+
+        /* Parse argument length */
+        if (datalen < 2) goto fmterr;
+        arglen = (p[0]<<8)|p[1];
+        datalen -= 2; p += 2;
+
+        /* Parse argument */
+        if (datalen < arglen) goto fmterr;
+        c->argv[c->argc] = createStringObject((char*)p,arglen);
+        datalen -= arglen; p += arglen;
+        c->argc++;
+    }
+
+    /* Process the request */
+    selectDb(c,dbid);
+    cmd = lookupCommand(c->argv[0]->ptr);
+    if (cmd == NULL) {
+        err = "-ERR unknown command received via UDP\r\n";
+        goto fmterr;
+    }
+
+    /* Let's try to encode the bulk object to save space. */
+    if (cmd->flags & REDIS_CMD_BULK)
+        c->argv[c->argc-1] = tryObjectEncoding(c->argv[c->argc-1]);
+
+    /* Check if the user is authenticated */
+    if (server.requirepass && !c->authenticated) {
+        err = "-ERR operation not permitted\r\n";
+        goto fmterr;
+    }
+
+    /* Handle the maxmemory directive */
+    if (server.maxmemory && (cmd->flags & REDIS_CMD_DENYOOM) &&
+        zmalloc_used_memory() > server.maxmemory)
+    {
+        err = "-ERR command not allowed when used memory > 'maxmemory'\r\n";
+        goto fmterr;
+    }
+
+    call(c,cmd);
+    if (!(hdr->flags & REDIS_UDP_FLAG_NOREPLY))
+        udpSendCommandReply(fd,sa,salen,(udpPacketHdr*)buf);
+    resetClient(c);
+    return;
+
+fmterr:
+    resetClient(c);
+    udpSendReplyPacket(fd,sa,salen, ntohl(hdr->reqid),
+        (unsigned char*)err, strlen(err));
+    return;
 }
 
 static void readUdpRequest(aeEventLoop *el, int fd, void *privdata, int mask) {
@@ -3122,7 +3220,7 @@ static void readUdpRequest(aeEventLoop *el, int fd, void *privdata, int mask) {
         if (len >= 4) {
             char *err = "-ERR Malformed Request\r\n";
             udpSendReplyPacket(fd,(struct sockaddr*) &sa,salen,
-                ntohl(hdr->opcode),
+                ntohl(hdr->reqid),
                 (unsigned char*)err, strlen(err));
         }
         return;
@@ -9026,6 +9124,8 @@ static struct redisClient *createFakeClient(void) {
     c->querybuf = sdsempty();
     c->argc = 0;
     c->argv = NULL;
+    c->mbargc = 0;
+    c->mbargv = NULL;
     c->flags = 0;
     /* We set the fake client as a slave waiting for the synchronization
      * so that Redis will not try to send replies to this client. */
