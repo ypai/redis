@@ -3073,7 +3073,6 @@ static void udpSendReplyPacket(int fd, struct sockaddr *sa, socklen_t salen, uin
             redisLog(REDIS_WARNING,"Unable to send the UDP reply: %s",
                 strerror(errno));
     }
-    server.stat_numcommands++;
 }
 
 static void udpSendCommandReply(int fd, struct sockaddr *sa, socklen_t salen, udpPacketHdr *req) {

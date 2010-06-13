@@ -52,12 +52,16 @@ nobuf:
 int main(void) {
     int s;
     char err[ANET_ERR_LEN];
+    int c = 0;
     sds argv[1];
     
+    // s = anetUdpConnectedClient(err, "192.168.1.105", 6379);
     s = anetUdpConnectedClient(err, "127.0.0.1", 6379);
     argv[0] = sdsnew("ping");
     while(1) {
         sendUDPRequestVector(s,1000,0,0,argv,1);
+        c++;
+        if (c == 1000000) break;
     }
     return 0;
 }
