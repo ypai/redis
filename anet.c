@@ -272,6 +272,36 @@ int anetUdpServer(char *err, int port, char *bindaddr) {
     return s;
 }
 
+int anetUdpConnectedClient(char *err, char *host, int port) {
+    int s;
+    struct sockaddr_in sa;
+    
+    if ((s = socket(AF_INET, SOCK_DGRAM, 0)) == -1) {
+        anetSetError(err, "socket: %s\n", strerror(errno));
+        return ANET_ERR;
+    }
+    memset(&sa,0,sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    if (inet_aton(host, &sa.sin_addr) == 0) {
+        struct hostent *he;
+
+        he = gethostbyname(host);
+        if (he == NULL) {
+            anetSetError(err, "can't resolve: %s\n", host);
+            close(s);
+            return ANET_ERR;
+        }
+        memcpy(&sa.sin_addr, he->h_addr, sizeof(struct in_addr));
+    }
+    if (connect(s, (struct sockaddr*)&sa, sizeof(sa)) == -1) {
+        anetSetError(err, "connect: %s\n", strerror(errno));
+        close(s);
+        return ANET_ERR;
+    }
+    return s;
+}
+
 int anetAccept(char *err, int serversock, char *ip, int *port)
 {
     int fd;
