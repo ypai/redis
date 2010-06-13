@@ -17,12 +17,14 @@ DEBUG?= -g -rdynamic -ggdb
 
 OBJ = adlist.o ae.o anet.o dict.o redis.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o
 BENCHOBJ = ae.o anet.o redis-benchmark.o sds.o adlist.o zmalloc.o
+UDPBENCHOBJ = anet.o redis-udp-benchmark.o sds.o zmalloc.o
 CLIOBJ = anet.o sds.o adlist.o redis-cli.o zmalloc.o linenoise.o
 CHECKDUMPOBJ = redis-check-dump.o lzf_c.o lzf_d.o
 CHECKAOFOBJ = redis-check-aof.o
 
 PRGNAME = redis-server
 BENCHPRGNAME = redis-benchmark
+UDPBENCHPRGNAME = redis-udp-benchmark
 CLIPRGNAME = redis-cli
 CHECKDUMPPRGNAME = redis-check-dump
 CHECKAOFPRGNAME = redis-check-aof
@@ -65,6 +67,9 @@ redis-server: $(OBJ)
 redis-benchmark: $(BENCHOBJ)
 	$(CC) -o $(BENCHPRGNAME) $(CCOPT) $(DEBUG) $(BENCHOBJ)
 
+redis-udp-benchmark: $(UDPBENCHOBJ)
+	$(CC) -o $(UDPBENCHPRGNAME) $(CCOPT) $(DEBUG) $(UDPBENCHOBJ)
+
 redis-cli: $(CLIOBJ)
 	$(CC) -o $(CLIPRGNAME) $(CCOPT) $(DEBUG) $(CLIOBJ)
 
@@ -78,7 +83,7 @@ redis-check-aof: $(CHECKAOFOBJ)
 	$(CC) -c $(CFLAGS) $(DEBUG) $(COMPILE_TIME) $<
 
 clean:
-	rm -rf $(PRGNAME) $(BENCHPRGNAME) $(CLIPRGNAME) $(CHECKDUMPPRGNAME) $(CHECKAOFPRGNAME) *.o *.gcda *.gcno *.gcov
+	rm -rf $(PRGNAME) $(BENCHPRGNAME) $(UDPBENCHPRGNAME) $(CLIPRGNAME) $(CHECKDUMPPRGNAME) $(CHECKAOFPRGNAME) *.o *.gcda *.gcno *.gcov
 
 dep:
 	$(CC) -MM *.c

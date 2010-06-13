@@ -5,6 +5,7 @@
 redis-cli
 redis-server
 redis-benchmark
+redis-udp-benchmark
 redis-check-dump
 redis-check-aof
 doc-tools
