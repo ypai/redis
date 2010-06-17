@@ -4621,13 +4621,11 @@ static void incrDecrCommand(redisClient *c, long long incr, bool by) {
 
         if (by == true) {
             j += 1;
-            if (getLongLongFromObjectOrReply(c, c->argv[j], &finalIncr, NULL) != REDIS_OK) continue;
+            if (incr == 0 && getLongLongFromObjectOrReply(c, c->argv[j], &finalIncr, NULL) != REDIS_OK) continue;
         }
 
         o = lookupKeyWrite(c->db,c->argv[i]);
-        if (o != NULL && checkType(c,o,REDIS_STRING)) {
-            continue;
-        }
+        if (o != NULL && checkType(c,o,REDIS_STRING)) continue;
 
         if (getLongLongFromObjectOrReply(c,o,&value,NULL) != REDIS_OK) {
             continue;
