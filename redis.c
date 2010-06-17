@@ -4609,37 +4609,36 @@ static void incrDecrCommand(redisClient *c, long long incr, bool by) {
         }
     }
 
-    addReplySds(c,sdscatprintf(sdsempty(),"*%d\r\n",(by == true) ? (c->argc-1)/2 : c->argc-1));
+    int sds = (by == true) ? (c->argc-1)/2 : c->argc-1;
+    if (sds > 1)
+        addReplySds(c,sdscatprintf(sdsempty(),"*%d\r\n",sds));
+
     for (j = 1; j < c->argc; j += 1) {
         long long finalIncr = incr;
         long long value;
         int i = j;
         robj *o;
 
-        if (by == true) j += 1;
-        if (getLongLongFromObjectOrReply(c, c->argv[j], &finalIncr, NULL) != REDIS_OK) continue;
+        if (by == true) {
+            j += 1;
+            if (getLongLongFromObjectOrReply(c, c->argv[j], &finalIncr, NULL) != REDIS_OK) continue;
+        }
 
         o = lookupKeyWrite(c->db,c->argv[i]);
         if (o != NULL && checkType(c,o,REDIS_STRING)) {
-            addReply(c,shared.wrongtypeerr);
             continue;
         }
 
         if (getLongLongFromObjectOrReply(c,o,&value,NULL) != REDIS_OK) {
-            addReplyBulk(c,shared.nullbulk);
             continue;
         } else {
             value += finalIncr;
             o = createStringObjectFromLongLong(value);
             dbReplace(c->db,c->argv[i],o);
             server.dirty++;
-            if ((c->argc > 2 && by == false) || (c->argc > 3 && by == true)) {
-                addReplyBulk(c,o);
-            } else {
-                addReply(c,shared.colon);
-                addReply(c,o);
-                addReply(c,shared.crlf);
-            }
+            addReply(c,shared.colon);
+            addReply(c,o);
+            addReply(c,shared.crlf);
         }
     }
 }
@@ -7262,13 +7261,7 @@ static void hmincrbyCommand(redisClient *c) {
         hashTypeTryObjectEncoding(o,&c->argv[j],NULL);
         hashTypeSet(o,c->argv[j],new);
         decrRefCount(new);
-        if (c->argc > 4) {
-            robj *v;
-            v = createStringObjectFromLongLong(value);
-            addReplyBulk(c,v);
-        } else {
-            addReplyLongLong(c,value);
-        }
+        addReplyLongLong(c,value);
         server.dirty++;
     }
 }

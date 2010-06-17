@@ -138,6 +138,59 @@ start_server {tags {"basic"}} {
         r decrby novar 17179869185
     } {-1}
 
+    test {MINCR against non existing keys} {
+        set res {}
+        append res [r mincr novar1 novar2]
+        append res [r mget novar1 novar2]
+    } {1 1}
+
+    test {MINCR against keys created by mincr itself} {
+        r mincr novar1 novar2
+    } {2 2}
+
+    test {MINCR against keys originally set with SET} {
+        r set novar1 100
+        r set novar2 200
+        r mincr novar1 novar2
+    } {101 201}
+
+    test {MINCRBY against keys originally set with SET} {
+        r set novar1 100
+        r set novar2 200
+        r mincr novar1 300 novar2 -100
+    } {400 100}
+
+    test {MINCR over 32bit value} {
+        r set novar1 17179869184
+        r set novar2 17179869184
+        r mincr novar1 novar2
+    } {17179869185 17179869185}
+
+    test {MINCRBY over 32bit value with over 32bit increment} {
+        r set novar1 17179869184
+        r set novar2 17179869184
+        r mincrby novar1 17179869184 novar2 17179869184
+    } {34359738368}
+
+    test {MINCR fails against keys with spaces (no integer encoded)} {
+        r set novar1 "    11    "
+        r set novar2 "    12    "
+        catch {r mincr novar1 novar2} err
+        format $err
+    } {ERR*}
+
+    test {MINCRBY fails against not integer increment value} {
+        r set novar1 5
+        r set novar2 10
+        catch {r mincrby novar1 4 novar2 "x"} err
+        format $err
+    } {ERR*}
+
+    test {DECRBY over 32bit value with over 32bit increment, negative res} {
+        r set novar 17179869184
+        r decrby novar 17179869185
+    } {-1}
+
     test {SETNX target key missing} {
         r setnx novar2 foobared
         r get novar2
