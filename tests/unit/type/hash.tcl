@@ -241,6 +241,11 @@ start_server {tags {"hash"}} {
         list [r hincrby htest foo 2]
     } {2}
 
+    test {HMINCRBY against non existing database keys} {
+        r del htest
+        r hmincrby htest foo 2 bar 3
+    } {2 3}
+
     test {HINCRBY against non existing hash key} {
         set rv {}
         r hdel smallhash tmp
@@ -264,6 +269,12 @@ start_server {tags {"hash"}} {
         r hset bighash tmp 100
         list [r hincrby smallhash tmp 2] [r hincrby bighash tmp 2]
     } {102 102}
+
+    test {HMINCRBY against hash keys originally set with HSET} {
+        r hset smallhash tmp1 100
+        r hset smallhash tmp2 200
+        r hmincrby smallhash tmp1 2 tmp2 500
+    } {102 700}
 
     test {HINCRBY over 32bit value} {
         r hset smallhash tmp 17179869184
