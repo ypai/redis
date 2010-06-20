@@ -4599,7 +4599,7 @@ static void msetnxCommand(redisClient *c) {
     msetGenericCommand(c,1);
 }
 
-static void incrDecrCommand(redisClient *c, long long incr, bool by) {
+static void incrDecrCommand(redisClient *c, long long incr, bool by, bool multi) {
     int j;
 
     if (incr == 0 && by == true) {
@@ -4634,27 +4634,34 @@ static void incrDecrCommand(redisClient *c, long long incr, bool by) {
             o = createStringObjectFromLongLong(value);
             dbReplace(c->db,c->argv[i],o);
             server.dirty++;
-            addReply(c,shared.colon);
-            addReply(c,o);
-            addReply(c,shared.crlf);
+
+            // if multi operation, return bulk-reply
+            if( multi==true ) {
+            	addReplyBulk(c,o);
+
+            } else {
+				addReply(c,shared.colon);
+				addReply(c,o);
+				addReply(c,shared.crlf);
+            }
         }
     }
 }
 
 static void incrCommand(redisClient *c) {
-    incrDecrCommand(c,1,false);
+    incrDecrCommand(c,1,false,false);
 }
 
 static void decrCommand(redisClient *c) {
-    incrDecrCommand(c,-1,false);
+    incrDecrCommand(c,-1,false,false);
 }
 
 static void mincrCommand(redisClient *c) {
-    incrDecrCommand(c,1,false);
+    incrDecrCommand(c,1,false,true);
 }
 
 static void mdecrCommand(redisClient *c) {
-    incrDecrCommand(c,-1,false);
+    incrDecrCommand(c,-1,false,true);
 }
 
 static void mincrbyCommand(redisClient *c) {
@@ -4662,21 +4669,21 @@ static void mincrbyCommand(redisClient *c) {
         addReplySds(c,sdsnew("-ERR wrong number of arguments for MINCRBY\r\n"));
         return;
     }
-    incrDecrCommand(c,0,true);
+    incrDecrCommand(c,0,true,true);
 }
 
 static void incrbyCommand(redisClient *c) {
     long long incr;
 
     if (getLongLongFromObjectOrReply(c, c->argv[2], &incr, NULL) != REDIS_OK) return;
-    incrDecrCommand(c,incr,true);
+    incrDecrCommand(c,incr,true,false);
 }
 
 static void decrbyCommand(redisClient *c) {
     long long incr;
 
     if (getLongLongFromObjectOrReply(c, c->argv[2], &incr, NULL) != REDIS_OK) return;
-    incrDecrCommand(c,-incr,true);
+    incrDecrCommand(c,-incr,true,false);
 }
 
 static void appendCommand(redisClient *c) {
@@ -7255,11 +7262,16 @@ static void hmincrbyCommand(redisClient *c) {
         }
 
         value += incr;
+
         new = createStringObjectFromLongLong(value);
+
         hashTypeTryObjectEncoding(o,&c->argv[j],NULL);
         hashTypeSet(o,c->argv[j],new);
+
+        addReplyBulk(c,new);
         decrRefCount(new);
-        addReplyLongLong(c,value);
+
+        //addReplyLongLong(c,value);
         server.dirty++;
     }
 }
